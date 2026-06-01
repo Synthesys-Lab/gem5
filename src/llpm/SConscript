@@ -1,0 +1,10 @@
+Import('*')
+
+SimObject('LLPMComponentAdapter.py', sim_objects=['LLPMComponentAdapter'])
+Source('llpm_component_adapter.cc')
+SimObject('LLPMCachePortAdapter.py', sim_objects=['LLPMCachePortAdapter'])
+Source('llpm_cache_port_adapter.cc')
+SimObject('LLPMPHT2BPredAdapter.py', sim_objects=['LLPMPHT2BPredAdapter'])
+Source('llpm_pht2_bpred_adapter.cc')
+SimObject('LLPMMinorPipelineAdapter.py', sim_objects=['LLPMMinorPipelineAdapter'])
+Source('llpm_minor_pipeline_adapter.cc')
