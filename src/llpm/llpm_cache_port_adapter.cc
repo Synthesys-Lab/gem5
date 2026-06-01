@@ -143,6 +143,14 @@ LLPMCachePortAdapter::recvCpuFunctional(PacketPtr pkt)
 Tick
 LLPMCachePortAdapter::recvCpuAtomic(PacketPtr pkt)
 {
+    if (pkt->getSize() > 8 || (!pkt->isRead() && !pkt->isWrite())) {
+        if (memSidePort.isConnected()) {
+            return memSidePort.sendAtomic(pkt);
+        }
+        fatal("LLPMCachePortAdapter cannot bypass unsupported packet without "
+              "a connected mem_side port");
+    }
+
     LlpmComponentRequest request = requestFromPacket(pkt);
     int32_t rc = submitFn(componentHandle, &request);
     if (rc < 0) {
@@ -159,9 +167,18 @@ LLPMCachePortAdapter::recvCpuAtomic(PacketPtr pkt)
         LlpmComponentResponse response = {};
         rc = popResponseFn(componentHandle, &response);
         if (rc == 0) {
-            applyResponseToPacket(pkt, response);
+            if (response.ok == 0) {
+                fatal("LLPM component returned error code %d",
+                      response.error_code);
+            }
+            Tick memoryLatency = 0;
+            if (memSidePort.isConnected()) {
+                memoryLatency = memSidePort.sendAtomic(pkt);
+            } else {
+                applyResponseToPacket(pkt, response);
+            }
             ++adapterCrossings;
-            return static_cast<Tick>(response.latency_cycles);
+            return memoryLatency + static_cast<Tick>(response.latency_cycles);
         }
         if (rc < 0) {
             fatal("LLPM component pop_response failed");
