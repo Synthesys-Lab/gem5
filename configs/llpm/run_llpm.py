@@ -273,16 +273,25 @@ COMMON_STAT_CANDIDATES = {
     ),
     "roi_loads": (
         "system.cpu.commit.loads",
+        "system.cpu.commitStats0.numLoadInsts",
+        "system.cpu.commitStats0.committedInstType::MemRead",
         "system.cpu.numLoadInsts",
+        "system.cpu.executeStats0.numLoadInsts",
     ),
     "roi_stores": (
         "system.cpu.commit.stores",
+        "system.cpu.commitStats0.numStoreInsts",
+        "system.cpu.commitStats0.committedInstType::MemWrite",
         "system.cpu.numStoreInsts",
+        "system.cpu.executeStats0.numStoreInsts",
     ),
     "roi_branches": (
         "system.cpu.commit.branches",
+        "system.cpu.commitStats0.committedControl::IsControl",
+        "system.cpu.executeStats0.numBranches",
         "system.cpu.numBranches",
         "system.cpu.branchPred.lookups",
+        "system.cpu.fetchStats0.numBranches",
     ),
 }
 DATA_CACHE_STAT_CANDIDATES = {
