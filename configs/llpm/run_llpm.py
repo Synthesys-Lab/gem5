@@ -352,9 +352,36 @@ BPRED_STAT_CANDIDATES = {
         "system.cpu.branchPred.condMispredicted",
     ),
 }
+MINOR_PIPELINE_STAT_CANDIDATES = {
+    "component_requests": (
+        "system.llpm_minor_pipeline.component_requests",
+    ),
+    "pipeline_steps": (
+        "system.llpm_minor_pipeline.pipeline_steps",
+    ),
+    "ifetch_requests": (
+        "system.llpm_minor_pipeline.ifetch_requests",
+    ),
+    "data_load_requests": (
+        "system.llpm_minor_pipeline.data_load_requests",
+    ),
+    "data_store_requests": (
+        "system.llpm_minor_pipeline.data_store_requests",
+    ),
+    "memory_responses": (
+        "system.llpm_minor_pipeline.memory_responses",
+    ),
+    "halts": (
+        "system.llpm_minor_pipeline.halts",
+    ),
+    "faults": (
+        "system.llpm_minor_pipeline.faults",
+    ),
+}
 INTERCHANGEABLE_STAT_CANDIDATES = {
     "adapter_crossings": (
         "system.cpu.branchPred.conditionalBranchPred.adapter_crossings",
+        "system.llpm_minor_pipeline.adapter_crossings",
         "system.llpm_dcache.adapter_crossings",
         "system.llpm_icache.adapter_crossings",
         "llpm.adapter.crossings",
@@ -362,6 +389,7 @@ INTERCHANGEABLE_STAT_CANDIDATES = {
     ),
     "verilated_cycles": (
         "system.cpu.branchPred.conditionalBranchPred.verilated_cycles",
+        "system.llpm_minor_pipeline.verilated_cycles",
         "system.llpm_dcache.verilated_cycles",
         "system.llpm_icache.verilated_cycles",
         "llpm.verilated_cycles",
@@ -432,6 +460,30 @@ def select_stats_snapshot(path: Path) -> tuple[dict[str, float], str]:
     return snapshots[-1], "gem5-stats-whole-se"
 
 
+def select_minor_pipeline_snapshot(
+    snapshots: list[dict[str, float]],
+) -> dict[str, float]:
+    best_snapshot = snapshots[0]
+    best_score = -1.0
+    for snapshot in snapshots:
+        score = 0.0
+        for field in (
+            "component_requests",
+            "pipeline_steps",
+            "ifetch_requests",
+            "data_load_requests",
+            "data_store_requests",
+            "memory_responses",
+        ):
+            value = first_stat(snapshot, MINOR_PIPELINE_STAT_CANDIDATES[field])
+            if value is not None:
+                score += value
+        if score > best_score:
+            best_score = score
+            best_snapshot = snapshot
+    return best_snapshot
+
+
 def parse_stat_line(line: str) -> tuple[str, float] | None:
     body = line.split("#", 1)[0].strip()
     if not body:
@@ -463,10 +515,16 @@ def apply_stats_metrics(
     *,
     stats_path: Path,
 ) -> None:
-    snapshot, counter_source = select_stats_snapshot(stats_path)
-    if not snapshot:
+    snapshots = read_stats_snapshots(stats_path)
+    if not snapshots:
         row["counter_source"] = "smoke-normalized"
         return
+    snapshot, counter_source = select_stats_snapshot(stats_path)
+    component_snapshot = (
+        select_minor_pipeline_snapshot(snapshots)
+        if args.abc_component == "rtl-minor-pipeline"
+        else snapshot
+    )
     missing = []
     for field, names in COMMON_STAT_CANDIDATES.items():
         value = first_stat(snapshot, names)
@@ -474,10 +532,15 @@ def apply_stats_metrics(
             missing.append(field)
             continue
         row[field] = number(value)
-    apply_component_stats(row, args, snapshot, counter_source=counter_source)
+    apply_component_stats(
+        row,
+        args,
+        component_snapshot,
+        counter_source=counter_source,
+    )
     if args.abc_mode == "interchangeable":
         for field, names in INTERCHANGEABLE_STAT_CANDIDATES.items():
-            value = first_stat(snapshot, names)
+            value = first_stat(component_snapshot, names)
             if value is not None:
                 row[field] = number(value)
                 row["adapter_counter_source"] = counter_source
@@ -518,9 +581,13 @@ def apply_component_stats(
         if "predictions" in row:
             row["component_requests"] = row["predictions"]
         return
-    if args.abc_component == "rtl-minor-pipeline" and "roi_insts" in row:
-        row["component_requests"] = row["roi_insts"]
-        row["component_counter_source"] = "gem5-stats-derived-insts"
+    if args.abc_component == "rtl-minor-pipeline":
+        if apply_candidate_group(row, snapshot, MINOR_PIPELINE_STAT_CANDIDATES):
+            row["component_counter_source"] = counter_source
+            return
+        if "roi_insts" in row:
+            row["component_requests"] = row["roi_insts"]
+            row["component_counter_source"] = "gem5-stats-derived-insts"
 
 
 def apply_candidate_group(
@@ -718,6 +785,10 @@ def connect_cpu_ports(
         system.llpm_icache.mem_side = system.membus.cpu_side_ports
         system.llpm_dcache.mem_side = system.membus.cpu_side_ports
         return
+    if component == "rtl-minor-pipeline":
+        system.llpm_minor_pipeline = adapters[0]
+        system.llpm_minor_pipeline.ifetch_side = system.membus.cpu_side_ports
+        system.llpm_minor_pipeline.data_side = system.membus.cpu_side_ports
     system.cpu.icache_port = system.membus.cpu_side_ports
     system.cpu.dcache_port = system.membus.cpu_side_ports
 
