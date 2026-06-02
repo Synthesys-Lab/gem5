@@ -342,22 +342,26 @@ INSTRUCTION_CACHE_STAT_CANDIDATES = {
 }
 BPRED_STAT_CANDIDATES = {
     "predictions": (
+        "system.cpu.branchPred.conditionalBranchPred.predictions",
         "system.cpu.branchPred.lookups",
         "system.cpu.branchPred.condPredicted",
     ),
     "mispredictions": (
+        "system.cpu.branchPred.conditionalBranchPred.mispredictions",
         "system.cpu.branchPred.condIncorrect",
         "system.cpu.branchPred.condMispredicted",
     ),
 }
 INTERCHANGEABLE_STAT_CANDIDATES = {
     "adapter_crossings": (
+        "system.cpu.branchPred.conditionalBranchPred.adapter_crossings",
         "system.llpm_dcache.adapter_crossings",
         "system.llpm_icache.adapter_crossings",
         "llpm.adapter.crossings",
         "system.llpm.adapter_crossings",
     ),
     "verilated_cycles": (
+        "system.cpu.branchPred.conditionalBranchPred.verilated_cycles",
         "system.llpm_dcache.verilated_cycles",
         "system.llpm_icache.verilated_cycles",
         "llpm.verilated_cycles",
@@ -613,9 +617,11 @@ def run_se_atomic_workload(
     import m5  # type: ignore
     from m5.objects import (  # type: ignore
         AddrRange,
+        BranchPredictor,
         Process,
         Root,
         Cache,
+        LocalBP,
         SEWorkload,
         SimpleMemory,
         SrcClockDomain,
@@ -647,6 +653,7 @@ def run_se_atomic_workload(
         adapters=adapters,
         cache_cls=Cache,
     )
+    connect_branch_predictor(system, args=args, component=component, adapters=adapters)
     system.cpu.createInterruptController()
     if args.isa == "x86":
         system.cpu.interrupts[0].pio = system.membus.mem_side_ports
@@ -715,6 +722,24 @@ def connect_cpu_ports(
     system.cpu.dcache_port = system.membus.cpu_side_ports
 
 
+def connect_branch_predictor(
+    system,
+    *,
+    args: argparse.Namespace,
+    component: str,
+    adapters,
+) -> None:
+    from m5.objects import BranchPredictor, LocalBP  # type: ignore
+
+    if args.abc_mode == "native-gem5" and args.abc_component == "rtl-pht2-bpred":
+        system.cpu.branchPred = BranchPredictor(conditionalBranchPred=LocalBP())
+        return
+    if component == "rtl-pht2-bpred":
+        system.cpu.branchPred = BranchPredictor(
+            conditionalBranchPred=adapters[0]
+        )
+
+
 def main() -> int:
     args = argument_parser().parse_args()
     component = selected_component(args)
@@ -737,6 +762,10 @@ def main() -> int:
         from m5.objects import LLPMPHT2BPredAdapter  # type: ignore
     except ImportError:
         LLPMPHT2BPredAdapter = None
+    try:
+        from m5.objects import LLPMPHT2Conditional  # type: ignore
+    except ImportError:
+        LLPMPHT2Conditional = None
     adapters = ()
     if component == "rtl-dcache":
         if LLPMCachePortAdapter is None:
@@ -782,13 +811,13 @@ def main() -> int:
             ),
         )
     elif component == "rtl-pht2-bpred":
-        if LLPMPHT2BPredAdapter is None:
+        if LLPMPHT2Conditional is None:
             raise SystemExit(
-                "LLPMPHT2BPredAdapter SimObject is not built into this gem5 binary"
+                "LLPMPHT2Conditional SimObject is not built into this gem5 binary"
             )
         adapters = (
             make_component_adapter(
-                LLPMPHT2BPredAdapter,
+                LLPMPHT2Conditional,
                 args,
                 component=component,
                 library_path=library_path,
