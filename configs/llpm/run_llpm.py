@@ -184,6 +184,18 @@ def make_component_adapter(
     )
 
 
+def make_native_cache(cache_cls, *, cache_role: str):
+    return cache_cls(
+        size="16KiB" if cache_role == "instruction" else "64KiB",
+        assoc=2,
+        tag_latency=2,
+        data_latency=2,
+        response_latency=2,
+        mshrs=4,
+        tgts_per_mshr=20,
+    )
+
+
 def adapter_summary(adapters) -> str:
     return (
         ",".join(type(adapter).__name__ for adapter in adapters)
@@ -296,28 +308,34 @@ COMMON_STAT_CANDIDATES = {
 }
 DATA_CACHE_STAT_CANDIDATES = {
     "component_requests": (
+        "system.llpm_dcache.component_requests",
         "system.cpu.dcache.overallAccesses::total",
         "system.cpu.dcache.demandAccesses::total",
     ),
     "component_hits": (
+        "system.llpm_dcache.component_hits",
         "system.cpu.dcache.overallHits::total",
         "system.cpu.dcache.demandHits::total",
     ),
     "component_misses": (
+        "system.llpm_dcache.component_misses",
         "system.cpu.dcache.overallMisses::total",
         "system.cpu.dcache.demandMisses::total",
     ),
 }
 INSTRUCTION_CACHE_STAT_CANDIDATES = {
     "component_requests": (
+        "system.llpm_icache.component_requests",
         "system.cpu.icache.overallAccesses::total",
         "system.cpu.icache.demandAccesses::total",
     ),
     "component_hits": (
+        "system.llpm_icache.component_hits",
         "system.cpu.icache.overallHits::total",
         "system.cpu.icache.demandHits::total",
     ),
     "component_misses": (
+        "system.llpm_icache.component_misses",
         "system.cpu.icache.overallMisses::total",
         "system.cpu.icache.demandMisses::total",
     ),
@@ -334,10 +352,14 @@ BPRED_STAT_CANDIDATES = {
 }
 INTERCHANGEABLE_STAT_CANDIDATES = {
     "adapter_crossings": (
+        "system.llpm_dcache.adapter_crossings",
+        "system.llpm_icache.adapter_crossings",
         "llpm.adapter.crossings",
         "system.llpm.adapter_crossings",
     ),
     "verilated_cycles": (
+        "system.llpm_dcache.verilated_cycles",
+        "system.llpm_icache.verilated_cycles",
         "llpm.verilated_cycles",
         "system.llpm.verilated_cycles",
     ),
@@ -472,6 +494,8 @@ def apply_component_stats(
     if args.abc_component == "rtl-dcache":
         if apply_candidate_group(row, snapshot, DATA_CACHE_STAT_CANDIDATES):
             row["component_counter_source"] = counter_source
+        elif apply_zero_dcache_metrics_if_no_memrefs(row):
+            row["component_counter_source"] = "gem5-stats-derived-zero-memrefs"
         return
     if args.abc_component == "rtl-split-cache":
         updated = False
@@ -507,6 +531,17 @@ def apply_candidate_group(
             row[field] = number(value)
             updated = True
     return updated
+
+
+def apply_zero_dcache_metrics_if_no_memrefs(row: dict[str, object]) -> bool:
+    if float(row.get("roi_loads", -1)) != 0:
+        return False
+    if float(row.get("roi_stores", -1)) != 0:
+        return False
+    row["component_requests"] = 0
+    row["component_hits"] = 0
+    row["component_misses"] = 0
+    return True
 
 
 def write_smoke_result(args: argparse.Namespace) -> Path:
@@ -580,6 +615,7 @@ def run_se_atomic_workload(
         AddrRange,
         Process,
         Root,
+        Cache,
         SEWorkload,
         SimpleMemory,
         SrcClockDomain,
@@ -604,7 +640,13 @@ def run_se_atomic_workload(
 
         system.cpu = X86AtomicSimpleCPU()
     system.membus = SystemXBar()
-    connect_cpu_ports(system, component=component, adapters=adapters)
+    connect_cpu_ports(
+        system,
+        args=args,
+        component=component,
+        adapters=adapters,
+        cache_cls=Cache,
+    )
     system.cpu.createInterruptController()
     if args.isa == "x86":
         system.cpu.interrupts[0].pio = system.membus.mem_side_ports
@@ -633,7 +675,28 @@ def run_se_atomic_workload(
     return simulated_ticks, exit_event.getCause()
 
 
-def connect_cpu_ports(system, *, component: str, adapters) -> None:
+def connect_cpu_ports(
+    system,
+    *,
+    args: argparse.Namespace,
+    component: str,
+    adapters,
+    cache_cls,
+) -> None:
+    if args.abc_mode == "native-gem5" and args.abc_component == "rtl-dcache":
+        system.cpu.dcache = make_native_cache(cache_cls, cache_role="data")
+        system.cpu.icache_port = system.membus.cpu_side_ports
+        system.cpu.dcache_port = system.cpu.dcache.cpu_side
+        system.cpu.dcache.mem_side = system.membus.cpu_side_ports
+        return
+    if args.abc_mode == "native-gem5" and args.abc_component == "rtl-split-cache":
+        system.cpu.icache = make_native_cache(cache_cls, cache_role="instruction")
+        system.cpu.dcache = make_native_cache(cache_cls, cache_role="data")
+        system.cpu.icache_port = system.cpu.icache.cpu_side
+        system.cpu.dcache_port = system.cpu.dcache.cpu_side
+        system.cpu.icache.mem_side = system.membus.cpu_side_ports
+        system.cpu.dcache.mem_side = system.membus.cpu_side_ports
+        return
     if component == "rtl-dcache":
         system.llpm_dcache = adapters[0]
         system.cpu.icache_port = system.membus.cpu_side_ports

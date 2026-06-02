@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <string>
 
+#include "base/statistics.hh"
 #include "llpm/llpm_gem5_verilator_abi.h"
 #include "mem/port.hh"
 #include "params/LLPMCachePortAdapter.hh"
@@ -45,12 +46,23 @@ class LLPMCachePortAdapter : public SimObject
         void recvRangeChange() override;
     };
 
+    struct LLPMCachePortAdapterStats : public statistics::Group
+    {
+        LLPMCachePortAdapterStats(statistics::Group *parent);
+
+        statistics::Scalar adapter_crossings;
+        statistics::Scalar verilated_cycles;
+        statistics::Scalar component_requests;
+        statistics::Scalar component_hits;
+        statistics::Scalar component_misses;
+    };
+
     CpuSidePort cpuSidePort;
     MemSidePort memSidePort;
+    LLPMCachePortAdapterStats stats;
     void *libraryHandle = nullptr;
     void *componentHandle = nullptr;
     uint64_t nextRequestId = 1;
-    uint64_t adapterCrossings = 0;
 
     using AbiVersionFn = uint32_t (*)();
     using ComponentIdFn = uint32_t (*)();

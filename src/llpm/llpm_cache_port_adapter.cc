@@ -102,11 +102,28 @@ LLPMCachePortAdapter::MemSidePort::recvRangeChange()
     owner.recvMemRangeChange();
 }
 
+LLPMCachePortAdapter::LLPMCachePortAdapterStats::LLPMCachePortAdapterStats(
+    statistics::Group *parent)
+    : statistics::Group(parent),
+      ADD_STAT(adapter_crossings, statistics::units::Count::get(),
+               "LLPM cache adapter request and response boundary crossings"),
+      ADD_STAT(verilated_cycles, statistics::units::Cycle::get(),
+               "Component-reported Verilated cycles spent in LLPM cache"),
+      ADD_STAT(component_requests, statistics::units::Count::get(),
+               "LLPM cache requests submitted from gem5"),
+      ADD_STAT(component_hits, statistics::units::Count::get(),
+               "LLPM cache responses reported as hits"),
+      ADD_STAT(component_misses, statistics::units::Count::get(),
+               "LLPM cache responses reported as misses")
+{
+}
+
 LLPMCachePortAdapter::LLPMCachePortAdapter(
     const LLPMCachePortAdapterParams &params)
     : SimObject(params),
       cpuSidePort(name() + ".cpu_side", *this),
       memSidePort(name() + ".mem_side", *this),
+      stats(this),
       component(params.component),
       libraryPath(params.library_path),
       resetCycles(params.reset_cycles),
@@ -157,7 +174,8 @@ LLPMCachePortAdapter::recvCpuAtomic(PacketPtr pkt)
         fatal("LLPM component submit failed for request %llu",
               static_cast<unsigned long long>(request.request_id));
     }
-    ++adapterCrossings;
+    ++stats.component_requests;
+    ++stats.adapter_crossings;
 
     for (uint64_t cycle = 0; cycle < MaxBlockingAtomicCycles; ++cycle) {
         rc = stepFn(componentHandle, 1);
@@ -177,7 +195,15 @@ LLPMCachePortAdapter::recvCpuAtomic(PacketPtr pkt)
             } else {
                 applyResponseToPacket(pkt, response);
             }
-            ++adapterCrossings;
+            ++stats.adapter_crossings;
+            stats.verilated_cycles += response.latency_cycles;
+            if (response.hit_valid != 0) {
+                if (response.hit != 0) {
+                    ++stats.component_hits;
+                } else {
+                    ++stats.component_misses;
+                }
+            }
             return memoryLatency + static_cast<Tick>(response.latency_cycles);
         }
         if (rc < 0) {
