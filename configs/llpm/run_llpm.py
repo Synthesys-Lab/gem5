@@ -236,11 +236,12 @@ def component_request_count(args: argparse.Namespace) -> int:
     return base
 
 
-def smoke_component_metrics(args: argparse.Namespace) -> dict[str, int]:
+def smoke_component_metrics(args: argparse.Namespace) -> dict[str, int | str]:
     requests = component_request_count(args)
     if args.abc_component in {"rtl-dcache", "rtl-split-cache"}:
         misses = max(1, requests // 16)
         return {
+            "component_counter_source": "smoke-normalized",
             "component_requests": requests,
             "component_hits": requests - misses,
             "component_misses": misses,
@@ -248,16 +249,248 @@ def smoke_component_metrics(args: argparse.Namespace) -> dict[str, int]:
     if args.abc_component == "rtl-pht2-bpred":
         mispredictions = max(1, requests // 8)
         return {
+            "component_counter_source": "smoke-normalized",
             "component_requests": requests,
             "predictions": requests,
             "mispredictions": mispredictions,
         }
-    return {"component_requests": requests}
+    return {
+        "component_counter_source": "smoke-normalized",
+        "component_requests": requests,
+    }
+
+
+COMMON_STAT_CANDIDATES = {
+    "roi_insts": (
+        "simInsts",
+        "system.cpu.committedInsts",
+        "system.cpu.numInsts",
+    ),
+    "roi_cycles": (
+        "system.cpu.numCycles",
+        "system.cpu.numCycles.value",
+        "simTicks",
+    ),
+    "roi_loads": (
+        "system.cpu.commit.loads",
+        "system.cpu.numLoadInsts",
+    ),
+    "roi_stores": (
+        "system.cpu.commit.stores",
+        "system.cpu.numStoreInsts",
+    ),
+    "roi_branches": (
+        "system.cpu.commit.branches",
+        "system.cpu.numBranches",
+        "system.cpu.branchPred.lookups",
+    ),
+}
+DATA_CACHE_STAT_CANDIDATES = {
+    "component_requests": (
+        "system.cpu.dcache.overallAccesses::total",
+        "system.cpu.dcache.demandAccesses::total",
+    ),
+    "component_hits": (
+        "system.cpu.dcache.overallHits::total",
+        "system.cpu.dcache.demandHits::total",
+    ),
+    "component_misses": (
+        "system.cpu.dcache.overallMisses::total",
+        "system.cpu.dcache.demandMisses::total",
+    ),
+}
+INSTRUCTION_CACHE_STAT_CANDIDATES = {
+    "component_requests": (
+        "system.cpu.icache.overallAccesses::total",
+        "system.cpu.icache.demandAccesses::total",
+    ),
+    "component_hits": (
+        "system.cpu.icache.overallHits::total",
+        "system.cpu.icache.demandHits::total",
+    ),
+    "component_misses": (
+        "system.cpu.icache.overallMisses::total",
+        "system.cpu.icache.demandMisses::total",
+    ),
+}
+BPRED_STAT_CANDIDATES = {
+    "predictions": (
+        "system.cpu.branchPred.lookups",
+        "system.cpu.branchPred.condPredicted",
+    ),
+    "mispredictions": (
+        "system.cpu.branchPred.condIncorrect",
+        "system.cpu.branchPred.condMispredicted",
+    ),
+}
+INTERCHANGEABLE_STAT_CANDIDATES = {
+    "adapter_crossings": (
+        "llpm.adapter.crossings",
+        "system.llpm.adapter_crossings",
+    ),
+    "verilated_cycles": (
+        "llpm.verilated_cycles",
+        "system.llpm.verilated_cycles",
+    ),
+}
+
+
+def smoke_common_metrics(
+    args: argparse.Namespace,
+    *,
+    simulated_ticks: int | None = None,
+) -> dict[str, int | str]:
+    roi_insts = 512 + len(args.workload) * 8
+    return {
+        "counter_source": "smoke-normalized",
+        "roi_insts": roi_insts,
+        "roi_loads": 64 + len(args.workload),
+        "roi_stores": 32 + len(args.workload),
+        "roi_branches": 16 + len(args.workload),
+        "roi_cycles": (
+            max(1, simulated_ticks)
+            if simulated_ticks is not None
+            else roi_insts * (3 if args.abc_mode == "interchangeable" else 2)
+        ),
+    }
+
+
+def read_last_stats_snapshot(path: Path) -> dict[str, float]:
+    if not path.is_file():
+        return {}
+    snapshots = []
+    current = {}
+    in_section = False
+    saw_marker = False
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("---------- Begin Simulation Statistics"):
+            saw_marker = True
+            current = {}
+            in_section = True
+            continue
+        if stripped.startswith("---------- End Simulation Statistics"):
+            if in_section:
+                snapshots.append(dict(current))
+            current = {}
+            in_section = False
+            continue
+        if saw_marker and not in_section:
+            continue
+        parsed = parse_stat_line(stripped)
+        if parsed is not None:
+            name, value = parsed
+            current[name] = value
+    if current:
+        snapshots.append(dict(current))
+    return snapshots[-1] if snapshots else {}
+
+
+def parse_stat_line(line: str) -> tuple[str, float] | None:
+    body = line.split("#", 1)[0].strip()
+    if not body:
+        return None
+    parts = body.split()
+    if len(parts) < 2:
+        return None
+    try:
+        value = float(parts[1])
+    except ValueError:
+        return None
+    return parts[0], value
+
+
+def first_stat(snapshot: dict[str, float], names: tuple[str, ...]) -> float | None:
+    for name in names:
+        if name in snapshot:
+            return snapshot[name]
+    return None
+
+
+def number(value: float) -> int | float:
+    return int(value) if value.is_integer() else value
+
+
+def apply_stats_metrics(
+    row: dict[str, object],
+    args: argparse.Namespace,
+    *,
+    stats_path: Path,
+) -> None:
+    snapshot = read_last_stats_snapshot(stats_path)
+    if not snapshot:
+        row["counter_source"] = "smoke-normalized"
+        return
+    missing = []
+    for field, names in COMMON_STAT_CANDIDATES.items():
+        value = first_stat(snapshot, names)
+        if value is None:
+            missing.append(field)
+            continue
+        row[field] = number(value)
+    apply_component_stats(row, args, snapshot)
+    if args.abc_mode == "interchangeable":
+        for field, names in INTERCHANGEABLE_STAT_CANDIDATES.items():
+            value = first_stat(snapshot, names)
+            if value is not None:
+                row[field] = number(value)
+                row["adapter_counter_source"] = "gem5-stats-whole-se"
+    row["counter_source"] = (
+        "gem5-stats-whole-se-partial" if missing else "gem5-stats-whole-se"
+    )
+    if missing:
+        row["missing_gem5_stats_fields"] = missing
+
+
+def apply_component_stats(
+    row: dict[str, object],
+    args: argparse.Namespace,
+    snapshot: dict[str, float],
+) -> None:
+    if args.abc_component == "rtl-dcache":
+        if apply_candidate_group(row, snapshot, DATA_CACHE_STAT_CANDIDATES):
+            row["component_counter_source"] = "gem5-stats-whole-se"
+        return
+    if args.abc_component == "rtl-split-cache":
+        updated = False
+        for field in ("component_requests", "component_hits", "component_misses"):
+            data_value = first_stat(snapshot, DATA_CACHE_STAT_CANDIDATES[field])
+            inst_value = first_stat(snapshot, INSTRUCTION_CACHE_STAT_CANDIDATES[field])
+            if data_value is not None or inst_value is not None:
+                row[field] = number(float(data_value or 0) + float(inst_value or 0))
+                updated = True
+        if updated:
+            row["component_counter_source"] = "gem5-stats-whole-se"
+        return
+    if args.abc_component == "rtl-pht2-bpred":
+        if apply_candidate_group(row, snapshot, BPRED_STAT_CANDIDATES):
+            row["component_counter_source"] = "gem5-stats-whole-se"
+        if "predictions" in row:
+            row["component_requests"] = row["predictions"]
+        return
+    if args.abc_component == "rtl-minor-pipeline" and "roi_insts" in row:
+        row["component_requests"] = row["roi_insts"]
+        row["component_counter_source"] = "gem5-stats-derived-insts"
+
+
+def apply_candidate_group(
+    row: dict[str, object],
+    snapshot: dict[str, float],
+    candidates: dict[str, tuple[str, ...]],
+) -> bool:
+    updated = False
+    for field, names in candidates.items():
+        value = first_stat(snapshot, names)
+        if value is not None:
+            row[field] = number(value)
+            updated = True
+    return updated
 
 
 def write_smoke_result(args: argparse.Namespace) -> Path:
     requests = component_request_count(args)
-    roi_insts = 512 + len(args.workload) * 8
     row = {
         "isa": args.isa,
         "workload": args.workload,
@@ -266,14 +499,11 @@ def write_smoke_result(args: argparse.Namespace) -> Path:
         "final_status": "pass",
         "end_state_match": True,
         "execution_mode": args.execution_mode,
-        "roi_insts": roi_insts,
-        "roi_loads": 64 + len(args.workload),
-        "roi_stores": 32 + len(args.workload),
-        "roi_branches": 16 + len(args.workload),
-        "roi_cycles": roi_insts * (3 if args.abc_mode == "interchangeable" else 2),
+        **smoke_common_metrics(args),
         **smoke_component_metrics(args),
     }
     if args.abc_mode == "interchangeable":
+        row["adapter_counter_source"] = "smoke-normalized"
         row["adapter_crossings"] = requests * 2
         row["verilated_cycles"] = max(1, requests * 4 + args.llpm_reset_cycles)
     result_path = args.results_dir / "result.json"
@@ -292,7 +522,6 @@ def write_se_atomic_result(
     simulated_ticks: int,
 ) -> Path:
     requests = component_request_count(args)
-    roi_insts = 512 + len(args.workload) * 8
     row = {
         "isa": args.isa,
         "workload": args.workload,
@@ -303,16 +532,14 @@ def write_se_atomic_result(
         "execution_mode": args.execution_mode,
         "gem5_exit_cause": exit_cause,
         "gem5_workload_binary": workload_binary,
-        "roi_insts": roi_insts,
-        "roi_loads": 64 + len(args.workload),
-        "roi_stores": 32 + len(args.workload),
-        "roi_branches": 16 + len(args.workload),
-        "roi_cycles": max(1, simulated_ticks),
+        **smoke_common_metrics(args, simulated_ticks=simulated_ticks),
         **smoke_component_metrics(args),
     }
     if args.abc_mode == "interchangeable":
+        row["adapter_counter_source"] = "smoke-normalized"
         row["adapter_crossings"] = requests * 2
         row["verilated_cycles"] = max(1, requests * 4 + args.llpm_reset_cycles)
+    apply_stats_metrics(row, args, stats_path=args.results_dir / "stats.txt")
     result_path = args.results_dir / "result.json"
     result_path.write_text(
         json.dumps(row, indent=2, sort_keys=True) + "\n",
