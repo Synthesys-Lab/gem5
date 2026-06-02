@@ -355,9 +355,9 @@ def smoke_common_metrics(
     }
 
 
-def read_last_stats_snapshot(path: Path) -> dict[str, float]:
+def read_stats_snapshots(path: Path) -> list[dict[str, float]]:
     if not path.is_file():
-        return {}
+        return []
     snapshots = []
     current = {}
     in_section = False
@@ -385,7 +385,16 @@ def read_last_stats_snapshot(path: Path) -> dict[str, float]:
             current[name] = value
     if current:
         snapshots.append(dict(current))
-    return snapshots[-1] if snapshots else {}
+    return snapshots
+
+
+def select_stats_snapshot(path: Path) -> tuple[dict[str, float], str]:
+    snapshots = read_stats_snapshots(path)
+    if not snapshots:
+        return {}, "smoke-normalized"
+    if len(snapshots) > 1:
+        return snapshots[0], "gem5-stats-marker-dump"
+    return snapshots[-1], "gem5-stats-whole-se"
 
 
 def parse_stat_line(line: str) -> tuple[str, float] | None:
@@ -419,7 +428,7 @@ def apply_stats_metrics(
     *,
     stats_path: Path,
 ) -> None:
-    snapshot = read_last_stats_snapshot(stats_path)
+    snapshot, counter_source = select_stats_snapshot(stats_path)
     if not snapshot:
         row["counter_source"] = "smoke-normalized"
         return
@@ -430,15 +439,15 @@ def apply_stats_metrics(
             missing.append(field)
             continue
         row[field] = number(value)
-    apply_component_stats(row, args, snapshot)
+    apply_component_stats(row, args, snapshot, counter_source=counter_source)
     if args.abc_mode == "interchangeable":
         for field, names in INTERCHANGEABLE_STAT_CANDIDATES.items():
             value = first_stat(snapshot, names)
             if value is not None:
                 row[field] = number(value)
-                row["adapter_counter_source"] = "gem5-stats-whole-se"
+                row["adapter_counter_source"] = counter_source
     row["counter_source"] = (
-        "gem5-stats-whole-se-partial" if missing else "gem5-stats-whole-se"
+        f"{counter_source}-partial" if missing else counter_source
     )
     if missing:
         row["missing_gem5_stats_fields"] = missing
@@ -448,10 +457,12 @@ def apply_component_stats(
     row: dict[str, object],
     args: argparse.Namespace,
     snapshot: dict[str, float],
+    *,
+    counter_source: str,
 ) -> None:
     if args.abc_component == "rtl-dcache":
         if apply_candidate_group(row, snapshot, DATA_CACHE_STAT_CANDIDATES):
-            row["component_counter_source"] = "gem5-stats-whole-se"
+            row["component_counter_source"] = counter_source
         return
     if args.abc_component == "rtl-split-cache":
         updated = False
@@ -462,11 +473,11 @@ def apply_component_stats(
                 row[field] = number(float(data_value or 0) + float(inst_value or 0))
                 updated = True
         if updated:
-            row["component_counter_source"] = "gem5-stats-whole-se"
+            row["component_counter_source"] = counter_source
         return
     if args.abc_component == "rtl-pht2-bpred":
         if apply_candidate_group(row, snapshot, BPRED_STAT_CANDIDATES):
-            row["component_counter_source"] = "gem5-stats-whole-se"
+            row["component_counter_source"] = counter_source
         if "predictions" in row:
             row["component_requests"] = row["predictions"]
         return
